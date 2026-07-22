@@ -2,3 +2,4 @@
 .venv
 *.log
 *.json
+__pycache_*
