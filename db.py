@@ -6,8 +6,6 @@ from datetime import datetime, timezone
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(BASE_DIR, "staff_am_bot.db")
 
-DEFAULT_FILTERS = ["Python", "Django"]
-
 
 @contextmanager
 def get_connection():
@@ -21,16 +19,29 @@ def get_connection():
         conn.close()
 
 
+def _column_exists(conn, table: str, column: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(row["name"] == column for row in rows)
+
+
 def init_db():
     with get_connection() as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
                 chat_id INTEGER PRIMARY KEY,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                username TEXT,
+                first_name TEXT,
+                language_code TEXT
             )
             """
         )
+        # Migration for existing databases created before these columns existed
+        for column in ("username", "first_name", "language_code"):
+            if not _column_exists(conn, "users", column):
+                conn.execute(f"ALTER TABLE users ADD COLUMN {column} TEXT")
+
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS filters (
@@ -59,10 +70,12 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def ensure_user(chat_id: int) -> bool:
+def ensure_user(chat_id: int, username: str = None, first_name: str = None, language_code: str = None) -> bool:
     """
-    Registers a chat_id if it's not already known.
-    Returns True if this was a brand new user (so caller can seed default filters).
+    Registers a chat_id if it's not already known, storing basic Telegram
+    profile info (username, first name, language). If the user already
+    exists, refreshes these fields in case they changed (e.g. user renamed
+    themselves or changed their username) - returns False in that case.
     """
     with get_connection() as conn:
         existing = conn.execute(
@@ -70,11 +83,22 @@ def ensure_user(chat_id: int) -> bool:
         ).fetchone()
 
         if existing:
+            conn.execute(
+                """
+                UPDATE users
+                SET username = ?, first_name = ?, language_code = ?
+                WHERE chat_id = ?
+                """,
+                (username, first_name, language_code, chat_id),
+            )
             return False
 
         conn.execute(
-            "INSERT INTO users (chat_id, created_at) VALUES (?, ?)",
-            (chat_id, _now()),
+            """
+            INSERT INTO users (chat_id, created_at, username, first_name, language_code)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (chat_id, _now(), username, first_name, language_code),
         )
         return True
 
@@ -83,6 +107,15 @@ def get_all_user_ids() -> list:
     with get_connection() as conn:
         rows = conn.execute("SELECT chat_id FROM users").fetchall()
         return [row["chat_id"] for row in rows]
+
+
+def get_user_info(chat_id: int) -> dict:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT chat_id, username, first_name, language_code, created_at FROM users WHERE chat_id = ?",
+            (chat_id,),
+        ).fetchone()
+        return dict(row) if row else None
 
 
 def load_filters(chat_id: int) -> list:
@@ -126,11 +159,6 @@ def remove_filter(chat_id: int, keyword: str) -> tuple[bool, list]:
         removed = cursor.rowcount > 0
 
     return removed, load_filters(chat_id)
-
-
-def seed_default_filters(chat_id: int):
-    for keyword in DEFAULT_FILTERS:
-        add_filter(chat_id, keyword)
 
 
 def is_job_seen(chat_id: int, job_id: int) -> bool:

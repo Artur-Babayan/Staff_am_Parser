@@ -35,25 +35,36 @@ def format_filters_list(filters_list: list) -> str:
     return "Your current filters:\n" + "\n".join(f"• {f}" for f in filters_list)
 
 
-def register_user_if_new(chat_id: int):
+def register_user_if_new(update: Update):
     """
-    Auto-registers any new chat_id on first contact and seeds it with
-    default filters. Each user only ever sees/edits their own filters.
+    Auto-registers any new chat_id on first contact, storing basic Telegram
+    profile info (username, first name, language). New users start with
+    an empty filter list - they add their own keywords via the bot.
+    Existing users get their profile info refreshed in case it changed.
     """
-    is_new = db.ensure_user(chat_id)
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+
+    is_new = db.ensure_user(
+        chat_id,
+        username=user.username if user else None,
+        first_name=user.first_name if user else None,
+        language_code=user.language_code if user else None,
+    )
     if is_new:
-        db.seed_default_filters(chat_id)
-        logger.info(f"New user registered: {chat_id}")
+        logger.info(f"New user registered: {chat_id} (@{user.username if user else 'unknown'})")
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    register_user_if_new(chat_id)
+    register_user_if_new(update)
 
     text = (
         "Hi! I'm the filter bot for the staff.am job parser.\n\n"
         "These filters are personal to you - other users don't see your "
         "filters or your job notifications, and you don't see theirs.\n\n"
+        "Your filter list is currently empty - use 'Add' below to add "
+        "keywords you're interested in (e.g. Python, QA, DevOps).\n\n"
         "Use the buttons below, or these commands:\n"
         "/filters - show your current filters\n"
         "/add <word> - add a filter, e.g.: /add QA\n"
@@ -64,7 +75,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def filters_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    register_user_if_new(chat_id)
+    register_user_if_new(update)
 
     await update.message.reply_text(
         format_filters_list(db.load_filters(chat_id)), reply_markup=main_menu_keyboard()
@@ -73,7 +84,7 @@ async def filters_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    register_user_if_new(chat_id)
+    register_user_if_new(update)
 
     if not context.args:
         await update.message.reply_text("Specify a keyword, e.g.: /add QA")
@@ -92,7 +103,7 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    register_user_if_new(chat_id)
+    register_user_if_new(update)
 
     if not context.args:
         await update.message.reply_text("Specify a keyword, e.g.: /remove Django")
@@ -113,7 +124,7 @@ async def on_filters_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     chat_id = update.effective_chat.id
-    register_user_if_new(chat_id)
+    register_user_if_new(update)
 
     await query.edit_message_text(
         format_filters_list(db.load_filters(chat_id)), reply_markup=main_menu_keyboard()
@@ -124,7 +135,7 @@ async def on_add_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     chat_id = update.effective_chat.id
-    register_user_if_new(chat_id)
+    register_user_if_new(update)
 
     context.user_data["menu_chat_id"] = query.message.chat_id
     context.user_data["menu_message_id"] = query.message.message_id
@@ -175,7 +186,7 @@ async def on_remove_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     chat_id = update.effective_chat.id
-    register_user_if_new(chat_id)
+    register_user_if_new(update)
 
     filters_list = db.load_filters(chat_id)
 

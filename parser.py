@@ -165,16 +165,6 @@ def get_profile_image(job: dict) -> str:
     return company.get("profile_image") or ""
 
 
-def job_matches_keyword(job: dict, keyword: str) -> bool:
-    """
-    Checks whether a job actually matches a given keyword. The staff.am
-    search is a bit loose, so we also do a local sanity check against
-    the job title before deciding it belongs to a particular user's filter.
-    """
-    title = get_job_title(job).lower()
-    return keyword.lower() in title
-
-
 def send_telegram_notification(chat_id: int, job: dict):
     if not TOKEN:
         raise RuntimeError("TOKEN not found in .env file.")
@@ -259,8 +249,7 @@ def main():
         candidate_jobs = {}
         for keyword in keywords:
             for job in jobs_by_keyword.get(keyword, []):
-                if job_matches_keyword(job, keyword):
-                    candidate_jobs[job.get("id")] = job
+                candidate_jobs[job.get("id")] = job
 
         new_jobs = [
             job for job_id, job in candidate_jobs.items()
