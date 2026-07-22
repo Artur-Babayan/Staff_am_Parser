@@ -1,20 +1,18 @@
 import os
 import re
 import time
-import json
 import asyncio
 import logging
 import requests
 from dotenv import load_dotenv
 from telegram import Bot
 
-from filters_store import load_filters
+import db
 from keyboards import main_menu_keyboard
 
 load_dotenv()
 
 TOKEN = os.getenv("TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
 
 HOME_PAGE_URL = "https://staff.am/am/jobs"
 DATA_ENDPOINT_TEMPLATE = "https://staff.am/_next/data/{build_id}/am/jobs.json"
@@ -23,7 +21,6 @@ TELEGRAM_SEND_PHOTO_URL = "https://api.telegram.org/bot{token}/sendPhoto"
 TELEGRAM_SEND_MESSAGE_URL = "https://api.telegram.org/bot{token}/sendMessage"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SEEN_JOBS_FILE = os.path.join(BASE_DIR, "seen_jobs.json")
 LOG_FILE = os.path.join(BASE_DIR, "parser.log")
 
 URL_LANG = "ru"
@@ -37,7 +34,6 @@ HEADERS = {
     "Accept": "application/json, text/plain, */*",
 }
 
-
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 logger.propagate = False
@@ -47,7 +43,6 @@ if not logger.handlers:
         fmt="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-
     _file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
     _file_handler.setFormatter(_formatter)
     logger.addHandler(_file_handler)
@@ -108,7 +103,7 @@ def build_job_url(job: dict, lang: str = URL_LANG) -> str:
 def collect_jobs_for_keyword(session: requests.Session, build_id: str, key_word: str, sort_by: int = 2, max_pages: int = 20, delay: float = 0.5):
     keyword_jobs = []
     page = 1
-    seen_ids = set()
+    seen_ids_this_run = set()
 
     logger.info(f"--- Collecting jobs for keyword: {key_word} ---")
 
@@ -124,55 +119,22 @@ def collect_jobs_for_keyword(session: requests.Session, build_id: str, key_word:
             logger.info(f"Empty page - no more jobs for '{key_word}'.")
             break
 
-        new_jobs = [j for j in jobs if j.get("id") not in seen_ids]
+        new_jobs = [j for j in jobs if j.get("id") not in seen_ids_this_run]
         if not new_jobs:
             logger.info(f"No new jobs on this page - end of list for '{key_word}'.")
             break
 
         for j in new_jobs:
             j["url"] = build_job_url(j)
-            seen_ids.add(j.get("id"))
+            seen_ids_this_run.add(j.get("id"))
 
         keyword_jobs.extend(new_jobs)
-        logger.info(f"Page {page}: fetched {len(new_jobs)} new jobs (total for '{key_word}': {len(keyword_jobs)})")
+        logger.info(f"Page {page}: fetched {len(new_jobs)} jobs (total for '{key_word}': {len(keyword_jobs)})")
 
         page += 1
         time.sleep(delay)
 
     return keyword_jobs
-
-
-def collect_all_jobs(session: requests.Session, build_id: str, key_words: list, sort_by: int = 2):
-    all_jobs = []
-    seen_ids = set()
-
-    for key_word in key_words:
-        jobs_for_keyword = collect_jobs_for_keyword(session, build_id, key_word=key_word, sort_by=sort_by)
-
-        new_jobs = [j for j in jobs_for_keyword if j.get("id") not in seen_ids]
-        for j in new_jobs:
-            seen_ids.add(j.get("id"))
-        all_jobs.extend(new_jobs)
-
-        logger.info(f"=== Total for '{key_word}': {len(jobs_for_keyword)} jobs ({len(new_jobs)} new for combined list) ===")
-
-    return all_jobs
-
-
-def load_seen_ids() -> set:
-    if not os.path.exists(SEEN_JOBS_FILE):
-        return set()
-    try:
-        with open(SEEN_JOBS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return set(data) if isinstance(data, list) else set()
-    except (json.JSONDecodeError, ValueError):
-        return set()
-
-
-def save_seen_ids(ids: set):
-    with open(SEEN_JOBS_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(ids), f, ensure_ascii=False, indent=2)
 
 
 def get_job_title(job: dict, lang: str = URL_LANG) -> str:
@@ -183,8 +145,6 @@ def get_job_title(job: dict, lang: str = URL_LANG) -> str:
             return result
     elif title:
         return title
-
-    logger.debug(f"Could not resolve title for job id={job.get('id')}. Title value: {title!r}")
     return "No title"
 
 
@@ -197,8 +157,6 @@ def get_company_title(job: dict, lang: str = URL_LANG) -> str:
             return result
     elif title:
         return title
-
-    logger.debug(f"Could not resolve company for job id={job.get('id')}. companiesStruct: {company!r}")
     return "Company not specified"
 
 
@@ -207,9 +165,19 @@ def get_profile_image(job: dict) -> str:
     return company.get("profile_image") or ""
 
 
-def send_telegram_notification(job: dict):
-    if not TOKEN or not CHAT_ID:
-        raise RuntimeError("TOKEN or CHAT_ID not found in .env file.")
+def job_matches_keyword(job: dict, keyword: str) -> bool:
+    """
+    Checks whether a job actually matches a given keyword. The staff.am
+    search is a bit loose, so we also do a local sanity check against
+    the job title before deciding it belongs to a particular user's filter.
+    """
+    title = get_job_title(job).lower()
+    return keyword.lower() in title
+
+
+def send_telegram_notification(chat_id: int, job: dict):
+    if not TOKEN:
+        raise RuntimeError("TOKEN not found in .env file.")
 
     title = get_job_title(job)
     company = get_company_title(job)
@@ -221,29 +189,31 @@ def send_telegram_notification(job: dict):
     if image_url:
         resp = requests.post(
             TELEGRAM_SEND_PHOTO_URL.format(token=TOKEN),
-            data={"chat_id": CHAT_ID, "photo": image_url, "caption": caption},
+            data={"chat_id": chat_id, "photo": image_url, "caption": caption},
             timeout=15,
         )
     else:
         resp = requests.post(
             TELEGRAM_SEND_MESSAGE_URL.format(token=TOKEN),
-            data={"chat_id": CHAT_ID, "text": caption},
+            data={"chat_id": chat_id, "text": caption},
             timeout=15,
         )
 
     if resp.status_code != 200:
-        logger.error(f"Failed to send Telegram notification for job {job.get('id')}: {resp.status_code} {resp.text}")
-    else:
-        logger.info(f"Sent to Telegram: {title} ({company})")
+        logger.error(f"Failed to notify chat_id={chat_id} about job {job.get('id')}: {resp.status_code} {resp.text}")
+        return False
+
+    logger.info(f"Sent to chat_id={chat_id}: {title} ({company})")
+    return True
 
 
-async def send_fresh_menu():
-    if not TOKEN or not CHAT_ID:
-        raise RuntimeError("TOKEN or CHAT_ID not found in .env file.")
+async def send_fresh_menu(chat_id: int):
+    if not TOKEN:
+        raise RuntimeError("TOKEN not found in .env file.")
 
     bot = Bot(token=TOKEN)
     await bot.send_message(
-        chat_id=CHAT_ID,
+        chat_id=chat_id,
         text="Menu:",
         reply_markup=main_menu_keyboard(),
     )
@@ -253,12 +223,21 @@ def main():
     logger.info("=" * 60)
     logger.info("Parser run started")
 
-    key_words = load_filters()
-    if not key_words:
-        logger.warning("Filter list is empty (filters.json). Nothing to parse, exiting.")
+    user_ids = db.get_all_user_ids()
+    if not user_ids:
+        logger.info("No registered users yet. Nothing to do.")
         return
 
-    logger.info(f"Current filters: {key_words}")
+    # Collect the union of all keywords across all users, so we only hit
+    # staff.am once per unique keyword instead of once per user.
+    user_filters = {chat_id: db.load_filters(chat_id) for chat_id in user_ids}
+    all_keywords = sorted({kw for kws in user_filters.values() for kw in kws})
+
+    if not all_keywords:
+        logger.info("No filters configured by any user. Nothing to do.")
+        return
+
+    logger.info(f"Registered users: {len(user_ids)}. Unique keywords to fetch: {all_keywords}")
 
     session = requests.Session()
 
@@ -266,22 +245,46 @@ def main():
     build_id = get_build_id(session)
     logger.info(f"build_id: {build_id}")
 
-    jobs = collect_all_jobs(session, build_id, key_words=key_words, sort_by=2)
+    # jobs_by_keyword: keyword -> list of job dicts (raw, deduped only within that keyword's pages)
+    jobs_by_keyword = {}
+    for keyword in all_keywords:
+        jobs_by_keyword[keyword] = collect_jobs_for_keyword(session, build_id, key_word=keyword, sort_by=2)
 
-    seen_ids = load_seen_ids()
-    new_jobs = [j for j in jobs if j.get("id") not in seen_ids]
+    # For each user, figure out which jobs match their filters and haven't been sent to them yet
+    for chat_id in user_ids:
+        keywords = user_filters[chat_id]
+        if not keywords:
+            continue
 
-    logger.info(f"Total jobs found: {len(jobs)}. New (not yet sent): {len(new_jobs)}.")
+        candidate_jobs = {}
+        for keyword in keywords:
+            for job in jobs_by_keyword.get(keyword, []):
+                if job_matches_keyword(job, keyword):
+                    candidate_jobs[job.get("id")] = job
 
-    for job in new_jobs:
-        send_telegram_notification(job)
-        seen_ids.add(job.get("id"))
-        time.sleep(1)
+        new_jobs = [
+            job for job_id, job in candidate_jobs.items()
+            if not db.is_job_seen(chat_id, job_id)
+        ]
 
-    save_seen_ids(seen_ids)
+        if not new_jobs:
+            logger.info(f"chat_id={chat_id}: no new jobs to send.")
+            continue
 
-    if new_jobs:
-        asyncio.run(send_fresh_menu())
+        logger.info(f"chat_id={chat_id}: sending {len(new_jobs)} new job(s).")
+
+        sent_any = False
+        for job in new_jobs:
+            success = send_telegram_notification(chat_id, job)
+            if success:
+                db.mark_job_seen(chat_id, job.get("id"))
+                sent_any = True
+            time.sleep(1)
+
+        if sent_any:
+            asyncio.run(send_fresh_menu(chat_id))
+
+    db.cleanup_old_seen_jobs(days=30)
 
     logger.info("Parser run finished")
 

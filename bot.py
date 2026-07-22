@@ -12,16 +12,16 @@ from telegram.ext import (
     filters,
 )
 
-from filters_store import load_filters, add_filter, remove_filter
+import db
 from keyboards import main_menu_keyboard, CB_FILTERS, CB_ADD, CB_REMOVE
 
 load_dotenv()
 
 TOKEN = os.getenv("TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
 
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
@@ -29,24 +29,33 @@ logger = logging.getLogger(__name__)
 WAITING_FOR_NEW_FILTER = 1
 
 
-def is_authorized(update: Update) -> bool:
-    if not CHAT_ID:
-        return True
-    chat_id = update.effective_chat.id if update.effective_chat else None
-    return str(chat_id) == str(CHAT_ID)
-
-
 def format_filters_list(filters_list: list) -> str:
     if not filters_list:
-        return "Filter list is empty."
-    return "Current filters:\n" + "\n".join(f"• {f}" for f in filters_list)
+        return "Your filter list is empty."
+    return "Your current filters:\n" + "\n".join(f"• {f}" for f in filters_list)
+
+
+def register_user_if_new(chat_id: int):
+    """
+    Auto-registers any new chat_id on first contact and seeds it with
+    default filters. Each user only ever sees/edits their own filters.
+    """
+    is_new = db.ensure_user(chat_id)
+    if is_new:
+        db.seed_default_filters(chat_id)
+        logger.info(f"New user registered: {chat_id}")
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    register_user_if_new(chat_id)
+
     text = (
         "Hi! I'm the filter bot for the staff.am job parser.\n\n"
+        "These filters are personal to you - other users don't see your "
+        "filters or your job notifications, and you don't see theirs.\n\n"
         "Use the buttons below, or these commands:\n"
-        "/filters - show current filters\n"
+        "/filters - show your current filters\n"
         "/add <word> - add a filter, e.g.: /add QA\n"
         "/remove <word> - remove a filter, e.g.: /remove Django"
     )
@@ -54,51 +63,48 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def filters_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update):
-        await update.message.reply_text("You don't have access to this bot.")
-        return
+    chat_id = update.effective_chat.id
+    register_user_if_new(chat_id)
 
     await update.message.reply_text(
-        format_filters_list(load_filters()), reply_markup=main_menu_keyboard()
+        format_filters_list(db.load_filters(chat_id)), reply_markup=main_menu_keyboard()
     )
 
 
 async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update):
-        await update.message.reply_text("You don't have access to this bot.")
-        return
+    chat_id = update.effective_chat.id
+    register_user_if_new(chat_id)
 
     if not context.args:
         await update.message.reply_text("Specify a keyword, e.g.: /add QA")
         return
 
     keyword = " ".join(context.args)
-    added, filters_list = add_filter(keyword)
+    added, filters_list = db.add_filter(chat_id, keyword)
 
     if added:
         text = f"Filter '{keyword}' added.\n\n{format_filters_list(filters_list)}"
     else:
-        text = f"Filter '{keyword}' is already in the list."
+        text = f"Filter '{keyword}' is already in your list."
 
     await update.message.reply_text(text, reply_markup=main_menu_keyboard())
 
 
 async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update):
-        await update.message.reply_text("You don't have access to this bot.")
-        return
+    chat_id = update.effective_chat.id
+    register_user_if_new(chat_id)
 
     if not context.args:
         await update.message.reply_text("Specify a keyword, e.g.: /remove Django")
         return
 
     keyword = " ".join(context.args)
-    removed, filters_list = remove_filter(keyword)
+    removed, filters_list = db.remove_filter(chat_id, keyword)
 
     if removed:
         text = f"Filter '{keyword}' removed.\n\n{format_filters_list(filters_list)}"
     else:
-        text = f"Filter '{keyword}' not found in the list."
+        text = f"Filter '{keyword}' not found in your list."
 
     await update.message.reply_text(text, reply_markup=main_menu_keyboard())
 
@@ -106,49 +112,46 @@ async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_filters_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
-    if not is_authorized(update):
-        await query.edit_message_text("You don't have access to this bot.")
-        return
+    chat_id = update.effective_chat.id
+    register_user_if_new(chat_id)
 
     await query.edit_message_text(
-        format_filters_list(load_filters()), reply_markup=main_menu_keyboard()
+        format_filters_list(db.load_filters(chat_id)), reply_markup=main_menu_keyboard()
     )
 
 
 async def on_add_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
-    if not is_authorized(update):
-        await query.edit_message_text("You don't have access to this bot.")
-        return ConversationHandler.END
+    chat_id = update.effective_chat.id
+    register_user_if_new(chat_id)
 
     context.user_data["menu_chat_id"] = query.message.chat_id
     context.user_data["menu_message_id"] = query.message.message_id
 
     await query.edit_message_text(
-        "Enter the keyword you want to add to the filters (e.g.: QA):"
+        "Enter the keyword you want to add to your filters (e.g.: QA):"
     )
     return WAITING_FOR_NEW_FILTER
 
 
 async def on_new_filter_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
     keyword = update.message.text.strip()
-    added, filters_list = add_filter(keyword)
+    added, filters_list = db.add_filter(chat_id, keyword)
 
     if added:
         text = f"Filter '{keyword}' added.\n\n{format_filters_list(filters_list)}"
     else:
-        text = f"Filter '{keyword}' is already in the list."
+        text = f"Filter '{keyword}' is already in your list."
 
-    chat_id = context.user_data.get("menu_chat_id")
-    message_id = context.user_data.get("menu_message_id")
+    menu_chat_id = context.user_data.get("menu_chat_id")
+    menu_message_id = context.user_data.get("menu_message_id")
 
-    if chat_id and message_id:
+    if menu_chat_id and menu_message_id:
         await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
+            chat_id=menu_chat_id,
+            message_id=menu_message_id,
             text=text,
             reply_markup=main_menu_keyboard(),
         )
@@ -171,16 +174,14 @@ async def on_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_remove_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    chat_id = update.effective_chat.id
+    register_user_if_new(chat_id)
 
-    if not is_authorized(update):
-        await query.edit_message_text("You don't have access to this bot.")
-        return
-
-    filters_list = load_filters()
+    filters_list = db.load_filters(chat_id)
 
     if not filters_list:
         await query.edit_message_text(
-            "Filter list is empty, nothing to remove.", reply_markup=main_menu_keyboard()
+            "Your filter list is empty, nothing to remove.", reply_markup=main_menu_keyboard()
         )
         return
 
@@ -199,13 +200,10 @@ async def on_remove_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_remove_filter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
-    if not is_authorized(update):
-        await query.edit_message_text("You don't have access to this bot.")
-        return
+    chat_id = update.effective_chat.id
 
     keyword = query.data.split(":", 1)[1]
-    removed, filters_list = remove_filter(keyword)
+    removed, filters_list = db.remove_filter(chat_id, keyword)
 
     if removed:
         text = f"Filter '{keyword}' removed.\n\n{format_filters_list(filters_list)}"
