@@ -37,7 +37,6 @@ def init_db():
             )
             """
         )
-        # Migration for existing databases created before these columns existed
         for column in ("username", "first_name", "language_code"):
             if not _column_exists(conn, "users", column):
                 conn.execute(f"ALTER TABLE users ADD COLUMN {column} TEXT")
@@ -162,6 +161,9 @@ def remove_filter(chat_id: int, keyword: str) -> tuple[bool, list]:
 
 
 def is_job_seen(chat_id: int, job_id: int) -> bool:
+    if job_id is None:
+        return True
+
     with get_connection() as conn:
         row = conn.execute(
             "SELECT 1 FROM seen_jobs WHERE chat_id = ? AND job_id = ?",
@@ -171,6 +173,9 @@ def is_job_seen(chat_id: int, job_id: int) -> bool:
 
 
 def mark_job_seen(chat_id: int, job_id: int):
+    if job_id is None:
+        return
+
     with get_connection() as conn:
         conn.execute(
             "INSERT OR IGNORE INTO seen_jobs (chat_id, job_id, seen_at) VALUES (?, ?, ?)",
