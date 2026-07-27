@@ -101,8 +101,6 @@ def collect_jobs_for_keyword(session: requests.Session, build_id: str, key_word:
             logger.info(f"Empty page - no more jobs for '{key_word}'.")
             break
 
-        # Jobs without a usable id can't be deduplicated (they'd be
-        # re-sent forever), so drop them here and log a warning.
         valid_jobs = []
         for j in jobs:
             job_id = j.get("id")
@@ -210,8 +208,6 @@ def main():
         logger.info("No registered users yet. Nothing to do.")
         return
 
-    # Collect the union of all keywords across all users, so we only hit
-    # staff.am once per unique keyword instead of once per user.
     user_filters = {chat_id: db.load_filters(chat_id) for chat_id in user_ids}
     all_keywords = sorted({kw for kws in user_filters.values() for kw in kws})
 
@@ -227,12 +223,10 @@ def main():
     build_id = get_build_id(session)
     logger.info(f"build_id: {build_id}")
 
-    # jobs_by_keyword: keyword -> list of job dicts (raw, deduped only within that keyword's pages)
     jobs_by_keyword = {}
     for keyword in all_keywords:
         jobs_by_keyword[keyword] = collect_jobs_for_keyword(session, build_id, key_word=keyword, sort_by=2)
 
-    # For each user, figure out which jobs match their filters and haven't been sent to them yet
     for chat_id in user_ids:
         keywords = user_filters[chat_id]
         if not keywords:

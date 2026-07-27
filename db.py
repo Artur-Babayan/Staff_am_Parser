@@ -70,12 +70,6 @@ def _now() -> str:
 
 
 def ensure_user(chat_id: int, username: str = None, first_name: str = None, language_code: str = None) -> bool:
-    """
-    Registers a chat_id if it's not already known, storing basic Telegram
-    profile info (username, first name, language). If the user already
-    exists, refreshes these fields in case they changed (e.g. user renamed
-    themselves or changed their username) - returns False in that case.
-    """
     with get_connection() as conn:
         existing = conn.execute(
             "SELECT 1 FROM users WHERE chat_id = ?", (chat_id,)
@@ -184,10 +178,6 @@ def mark_job_seen(chat_id: int, job_id: int):
 
 
 def cleanup_old_seen_jobs(days: int = 30):
-    """
-    Optional housekeeping: removes seen_jobs entries older than N days,
-    so the table doesn't grow forever. Safe to call periodically (e.g. once a day).
-    """
     with get_connection() as conn:
         conn.execute(
             "DELETE FROM seen_jobs WHERE seen_at < datetime('now', ?)",

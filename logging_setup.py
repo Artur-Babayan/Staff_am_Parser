@@ -31,12 +31,6 @@ def format_filters_list(filters_list: list) -> str:
 
 
 def register_user_if_new(update: Update):
-    """
-    Auto-registers any new chat_id on first contact, storing basic Telegram
-    profile info (username, first name, language). New users start with
-    an empty filter list - they add their own keywords via the bot.
-    Existing users get their profile info refreshed in case it changed.
-    """
     chat_id = update.effective_chat.id
     user = update.effective_user
 
