@@ -2,3 +2,5 @@
 .venv
 *.log
 *.json
+*.db
+.gitignore
