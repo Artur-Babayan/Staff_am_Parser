@@ -2,13 +2,13 @@ import os
 import re
 import time
 import asyncio
-import logging
 import requests
 from dotenv import load_dotenv
 from telegram import Bot
 
 import db
 from keyboards import main_menu_keyboard
+from logging_setup import get_logger
 
 load_dotenv()
 
@@ -19,9 +19,6 @@ DATA_ENDPOINT_TEMPLATE = "https://staff.am/_next/data/{build_id}/am/jobs.json"
 JOB_URL_TEMPLATE = "https://staff.am/{lang}/job/{slug}"
 TELEGRAM_SEND_PHOTO_URL = "https://api.telegram.org/bot{token}/sendPhoto"
 TELEGRAM_SEND_MESSAGE_URL = "https://api.telegram.org/bot{token}/sendMessage"
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_FILE = os.path.join(BASE_DIR, "parser.log")
 
 URL_LANG = "ru"
 
@@ -34,22 +31,7 @@ HEADERS = {
     "Accept": "application/json, text/plain, */*",
 }
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-logger.propagate = False
-
-if not logger.handlers:
-    _formatter = logging.Formatter(
-        fmt="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-    _file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
-    _file_handler.setFormatter(_formatter)
-    logger.addHandler(_file_handler)
-
-    _stream_handler = logging.StreamHandler()
-    _stream_handler.setFormatter(_formatter)
-    logger.addHandler(_stream_handler)
+logger = get_logger(__name__, "parser.log")
 
 
 def get_build_id(session: requests.Session) -> str:
@@ -119,6 +101,8 @@ def collect_jobs_for_keyword(session: requests.Session, build_id: str, key_word:
             logger.info(f"Empty page - no more jobs for '{key_word}'.")
             break
 
+        # Jobs without a usable id can't be deduplicated (they'd be
+        # re-sent forever), so drop them here and log a warning.
         valid_jobs = []
         for j in jobs:
             job_id = j.get("id")
@@ -226,6 +210,8 @@ def main():
         logger.info("No registered users yet. Nothing to do.")
         return
 
+    # Collect the union of all keywords across all users, so we only hit
+    # staff.am once per unique keyword instead of once per user.
     user_filters = {chat_id: db.load_filters(chat_id) for chat_id in user_ids}
     all_keywords = sorted({kw for kws in user_filters.values() for kw in kws})
 
@@ -241,10 +227,12 @@ def main():
     build_id = get_build_id(session)
     logger.info(f"build_id: {build_id}")
 
+    # jobs_by_keyword: keyword -> list of job dicts (raw, deduped only within that keyword's pages)
     jobs_by_keyword = {}
     for keyword in all_keywords:
         jobs_by_keyword[keyword] = collect_jobs_for_keyword(session, build_id, key_word=keyword, sort_by=2)
 
+    # For each user, figure out which jobs match their filters and haven't been sent to them yet
     for chat_id in user_ids:
         keywords = user_filters[chat_id]
         if not keywords:
