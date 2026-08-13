@@ -20,7 +20,7 @@ JOB_URL_TEMPLATE = "https://staff.am/{lang}/job/{slug}"
 TELEGRAM_SEND_PHOTO_URL = "https://api.telegram.org/bot{token}/sendPhoto"
 TELEGRAM_SEND_MESSAGE_URL = "https://api.telegram.org/bot{token}/sendMessage"
 
-URL_LANG = "ru"
+URL_LANG = "am"
 
 HEADERS = {
     "User-Agent": (
