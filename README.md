@@ -51,4 +51,5 @@ Inline buttons (Filters / Add / Remove) do the same thing without typing command
 
 - Each notification includes: job title, company, image, and link.
 - New users start with an empty filter list.
+- When a filter is added, existing matching jobs become its baseline; notifications start with jobs found on later parser runs.
 - `seen_jobs` entries older than 30 days are cleaned up automatically on each parser run.

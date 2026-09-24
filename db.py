@@ -6,6 +6,9 @@ from datetime import datetime, timezone
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(BASE_DIR, "staff_am_bot.db")
 
+MAX_FILTER_LENGTH = 50
+MAX_FILTERS_PER_USER = 20
+
 
 @contextmanager
 def get_connection():
@@ -15,6 +18,9 @@ def get_connection():
     try:
         yield conn
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -47,11 +53,17 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 chat_id INTEGER NOT NULL,
                 keyword TEXT NOT NULL,
+                initialized INTEGER NOT NULL DEFAULT 1,
                 UNIQUE(chat_id, keyword),
                 FOREIGN KEY(chat_id) REFERENCES users(chat_id)
             )
             """
         )
+        if not _column_exists(conn, "filters", "initialized"):
+            conn.execute(
+                "ALTER TABLE filters ADD COLUMN initialized INTEGER NOT NULL DEFAULT 1"
+            )
+
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS seen_jobs (
@@ -119,39 +131,90 @@ def load_filters(chat_id: int) -> list:
         return [row["keyword"] for row in rows]
 
 
-def add_filter(chat_id: int, keyword: str) -> tuple[bool, list]:
+def load_filter_records(chat_id: int) -> list:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, keyword, initialized FROM filters WHERE chat_id = ? ORDER BY id",
+            (chat_id,)
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def add_filter(chat_id: int, keyword: str) -> tuple[str, list]:
     keyword = keyword.strip()
     if not keyword:
-        return False, load_filters(chat_id)
+        return "empty", load_filters(chat_id)
+    if len(keyword) > MAX_FILTER_LENGTH:
+        return "too_long", load_filters(chat_id)
 
     with get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         existing = conn.execute(
             "SELECT 1 FROM filters WHERE chat_id = ? AND LOWER(keyword) = LOWER(?)",
             (chat_id, keyword),
         ).fetchone()
-
         if existing:
-            return False, load_filters(chat_id)
+            return "duplicate", load_filters(chat_id)
+
+        count = conn.execute(
+            "SELECT COUNT(*) FROM filters WHERE chat_id = ?", (chat_id,)
+        ).fetchone()[0]
+        if count >= MAX_FILTERS_PER_USER:
+            return "limit", load_filters(chat_id)
 
         conn.execute(
-            "INSERT INTO filters (chat_id, keyword) VALUES (?, ?)",
+            "INSERT INTO filters (chat_id, keyword, initialized) VALUES (?, ?, 0)",
             (chat_id, keyword),
         )
 
-    return True, load_filters(chat_id)
+    return "added", load_filters(chat_id)
 
 
 def remove_filter(chat_id: int, keyword: str) -> tuple[bool, list]:
     keyword = keyword.strip()
-
     with get_connection() as conn:
         cursor = conn.execute(
             "DELETE FROM filters WHERE chat_id = ? AND LOWER(keyword) = LOWER(?)",
             (chat_id, keyword),
         )
         removed = cursor.rowcount > 0
-
     return removed, load_filters(chat_id)
+
+
+def remove_filter_by_id(chat_id: int, filter_id: int) -> tuple[bool, str | None, list]:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT keyword FROM filters WHERE id = ? AND chat_id = ?",
+            (filter_id, chat_id),
+        ).fetchone()
+        if row is None:
+            return False, None, load_filters(chat_id)
+
+        conn.execute(
+            "DELETE FROM filters WHERE id = ? AND chat_id = ?",
+            (filter_id, chat_id),
+        )
+        keyword = row["keyword"]
+
+    return True, keyword, load_filters(chat_id)
+
+
+def initialize_filter(chat_id: int, filter_id: int, job_ids: list) -> bool:
+    valid_job_ids = [job_id for job_id in job_ids if job_id is not None]
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "UPDATE filters SET initialized = 1 WHERE id = ? AND chat_id = ? AND initialized = 0",
+            (filter_id, chat_id),
+        )
+        if cursor.rowcount == 0:
+            return False
+
+        seen_at = _now()
+        conn.executemany(
+            "INSERT OR IGNORE INTO seen_jobs (chat_id, job_id, seen_at) VALUES (?, ?, ?)",
+            [(chat_id, job_id, seen_at) for job_id in valid_job_ids],
+        )
+    return True
 
 
 def is_job_seen(chat_id: int, job_id: int) -> bool:

@@ -255,12 +255,12 @@ def run_parser():
         return 0
 
     try:
-        user_filters = {chat_id: db.load_filters(chat_id) for chat_id in user_ids}
+        user_filters = {chat_id: db.load_filter_records(chat_id) for chat_id in user_ids}
     except Exception:
         logger.exception("Could not load user filters from the database.")
         return 1
 
-    all_keywords = sorted({kw for kws in user_filters.values() for kw in kws})
+    all_keywords = sorted({record["keyword"] for records in user_filters.values() for record in records})
     if not all_keywords:
         logger.info("No filters configured by any user. Nothing to do.")
         return 0
@@ -276,7 +276,8 @@ def run_parser():
         return 1
     logger.info("build_id: %s", build_id)
 
-    stats = {"keywords_failed": 0, "users_failed": 0, "sent": 0, "send_failed": 0}
+    stats = {"keywords_failed": 0, "users_failed": 0, "filters_initialized": 0, "sent": 0, "send_failed": 0}
+    failed_keywords = set()
     jobs_by_keyword = {}
     for keyword in all_keywords:
         try:
@@ -285,24 +286,38 @@ def run_parser():
             )
         except Exception:
             stats["keywords_failed"] += 1
+            failed_keywords.add(keyword)
             jobs_by_keyword[keyword] = []
             logger.exception("Failed to collect jobs for keyword=%r; continuing.", keyword)
 
     for chat_id in user_ids:
         try:
-            keywords = user_filters[chat_id]
-            if not keywords:
+            filter_records = user_filters[chat_id]
+            if not filter_records:
                 continue
 
             candidate_jobs = {}
-            for keyword in keywords:
-                for job in jobs_by_keyword.get(keyword, []):
-                    candidate_jobs[job.get("id")] = job
+            for record in filter_records:
+                if record["initialized"]:
+                    for job in jobs_by_keyword.get(record["keyword"], []):
+                        candidate_jobs[job.get("id")] = job
 
             new_jobs = [
                 job for job_id, job in candidate_jobs.items()
                 if not db.is_job_seen(chat_id, job_id)
             ]
+
+            for record in filter_records:
+                keyword = record["keyword"]
+                if record["initialized"] or keyword in failed_keywords:
+                    continue
+                baseline_job_ids = [job.get("id") for job in jobs_by_keyword.get(keyword, [])]
+                if db.initialize_filter(chat_id, record["id"], baseline_job_ids):
+                    stats["filters_initialized"] += 1
+                    logger.info(
+                        "Initialized filter_id=%s for chat_id=%s with %s existing job(s).",
+                        record["id"], chat_id, len(baseline_job_ids),
+                    )
 
             if not new_jobs:
                 logger.info("chat_id=%s: no new jobs to send.", chat_id)
@@ -342,8 +357,9 @@ def run_parser():
         logger.exception("Could not clean up old seen_jobs records.")
 
     logger.info(
-        "Parser run finished: sent=%s, send_failed=%s, keywords_failed=%s, users_failed=%s",
-        stats["sent"], stats["send_failed"], stats["keywords_failed"], stats["users_failed"],
+        "Parser run finished: sent=%s, send_failed=%s, filters_initialized=%s, keywords_failed=%s, users_failed=%s",
+        stats["sent"], stats["send_failed"], stats["filters_initialized"],
+        stats["keywords_failed"], stats["users_failed"],
     )
     return 0
 
