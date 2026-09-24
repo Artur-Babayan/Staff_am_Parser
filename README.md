@@ -38,6 +38,15 @@ Example crontab entry:
 0 * * * * cd /path/to/project && /path/to/.venv/bin/python3 parser.py
 ```
 
+## Tests
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+The suite uses temporary SQLite databases and mocked HTTP calls, so it does not
+contact staff.am or Telegram. It also runs automatically in GitHub Actions.
+
 ## Bot commands
 
 - `/start` — register and show the menu
