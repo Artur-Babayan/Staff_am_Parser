@@ -255,7 +255,7 @@ def run_parser():
         return 0
 
     try:
-        user_filters = {chat_id: db.load_filter_records(chat_id) for chat_id in user_ids}
+        user_filters = db.load_all_filter_records(user_ids)
     except Exception:
         logger.exception("Could not load user filters from the database.")
         return 1
@@ -302,9 +302,10 @@ def run_parser():
                     for job in jobs_by_keyword.get(record["keyword"], []):
                         candidate_jobs[job.get("id")] = job
 
+            seen_job_ids = db.get_seen_job_ids(chat_id, list(candidate_jobs))
             new_jobs = [
                 job for job_id, job in candidate_jobs.items()
-                if not db.is_job_seen(chat_id, job_id)
+                if job_id not in seen_job_ids
             ]
 
             for record in filter_records:

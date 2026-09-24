@@ -14,6 +14,8 @@ MAX_FILTERS_PER_USER = 20
 def get_connection():
     conn = sqlite3.connect(DB_FILE, timeout=10)
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 10000")
+    conn.execute("PRAGMA synchronous = NORMAL")
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -32,6 +34,7 @@ def _column_exists(conn, table: str, column: str) -> bool:
 
 def init_db():
     with get_connection() as conn:
+        conn.execute("PRAGMA journal_mode = WAL")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -74,6 +77,9 @@ def init_db():
                 FOREIGN KEY(chat_id) REFERENCES users(chat_id)
             )
             """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_seen_jobs_seen_at ON seen_jobs(seen_at)"
         )
 
 
@@ -138,6 +144,24 @@ def load_filter_records(chat_id: int) -> list:
             (chat_id,)
         ).fetchall()
         return [dict(row) for row in rows]
+
+
+def load_all_filter_records(user_ids: list) -> dict:
+    records_by_user = {chat_id: [] for chat_id in user_ids}
+    if not user_ids:
+        return records_by_user
+
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, chat_id, keyword, initialized FROM filters ORDER BY id"
+        ).fetchall()
+    for row in rows:
+        chat_id = row["chat_id"]
+        if chat_id in records_by_user:
+            records_by_user[chat_id].append(
+                {"id": row["id"], "keyword": row["keyword"], "initialized": row["initialized"]}
+            )
+    return records_by_user
 
 
 def add_filter(chat_id: int, keyword: str) -> tuple[str, list]:
@@ -215,6 +239,24 @@ def initialize_filter(chat_id: int, filter_id: int, job_ids: list) -> bool:
             [(chat_id, job_id, seen_at) for job_id in valid_job_ids],
         )
     return True
+
+
+def get_seen_job_ids(chat_id: int, job_ids: list) -> set:
+    unique_ids = list(dict.fromkeys(job_id for job_id in job_ids if job_id is not None))
+    if not unique_ids:
+        return set()
+
+    seen_ids = set()
+    with get_connection() as conn:
+        for start in range(0, len(unique_ids), 900):
+            chunk = unique_ids[start:start + 900]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"SELECT job_id FROM seen_jobs WHERE chat_id = ? AND job_id IN ({placeholders})",
+                (chat_id, *chunk),
+            ).fetchall()
+            seen_ids.update(row["job_id"] for row in rows)
+    return seen_ids
 
 
 def is_job_seen(chat_id: int, job_id: int) -> bool:
