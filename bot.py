@@ -175,6 +175,14 @@ async def on_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    error = context.error
+    logger.error(
+        "Unhandled bot update error",
+        exc_info=(type(error), error, error.__traceback__),
+    )
+
+
 async def on_remove_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -251,6 +259,7 @@ def main():
     app.add_handler(CallbackQueryHandler(on_filters_button, pattern=f"^{CB_FILTERS}$"))
     app.add_handler(CallbackQueryHandler(on_remove_button, pattern=f"^{CB_REMOVE}$"))
     app.add_handler(CallbackQueryHandler(on_remove_filter_callback, pattern=r"^remove_filter:"))
+    app.add_error_handler(on_error)
 
     logger.info("Bot started and listening for messages...")
     app.run_polling()

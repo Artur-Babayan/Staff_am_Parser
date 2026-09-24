@@ -38,6 +38,32 @@ Example crontab entry:
 0 * * * * cd /path/to/project && /path/to/.venv/bin/python3 parser.py
 ```
 
+
+## Recommended systemd setup
+
+The supplied user units assume the project is located at
+`~/Documents/Staff_am_Parser`. If it is elsewhere, edit the paths in
+`deploy/systemd/*.service` first.
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp deploy/systemd/* ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now staff-am-bot.service staff-am-parser.timer
+```
+
+Check configuration and service health:
+
+```bash
+.venv/bin/python healthcheck.py
+systemctl --user status staff-am-bot.service staff-am-parser.timer
+systemctl --user list-timers staff-am-parser.timer
+journalctl --user -u staff-am-bot.service -u staff-am-parser.service -f
+```
+
+The bot restarts after failures. The parser runs hourly, catches up after
+machine downtime, and cannot overlap with another parser process.
+
 ## Tests
 
 ```bash

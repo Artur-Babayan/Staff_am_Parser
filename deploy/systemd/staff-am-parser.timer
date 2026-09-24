@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Staff.am parser hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=2m
+Unit=staff-am-parser.service
+
+[Install]
+WantedBy=timers.target

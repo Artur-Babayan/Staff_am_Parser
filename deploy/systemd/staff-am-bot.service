@@ -1,0 +1,20 @@
+[Unit]
+Description=Staff.am Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Documents/Staff_am_Parser
+EnvironmentFile=%h/Documents/Staff_am_Parser/.env
+ExecStartPre=%h/Documents/Staff_am_Parser/.venv/bin/python healthcheck.py
+ExecStart=%h/Documents/Staff_am_Parser/.venv/bin/python bot.py
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=%h/Documents/Staff_am_Parser
+
+[Install]
+WantedBy=default.target
