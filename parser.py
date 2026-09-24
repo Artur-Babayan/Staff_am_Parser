@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import time
 import asyncio
 import requests
@@ -241,66 +242,109 @@ def main():
     logger.info("=" * 60)
     logger.info("Parser run started")
 
-    user_ids = db.get_all_user_ids()
+    try:
+        user_ids = db.get_all_user_ids()
+    except Exception:
+        logger.exception("Could not load users from the database.")
+        return 1
+
     if not user_ids:
         logger.info("No registered users yet. Nothing to do.")
-        return
+        return 0
 
-    user_filters = {chat_id: db.load_filters(chat_id) for chat_id in user_ids}
+    try:
+        user_filters = {chat_id: db.load_filters(chat_id) for chat_id in user_ids}
+    except Exception:
+        logger.exception("Could not load user filters from the database.")
+        return 1
+
     all_keywords = sorted({kw for kws in user_filters.values() for kw in kws})
-
     if not all_keywords:
         logger.info("No filters configured by any user. Nothing to do.")
-        return
+        return 0
 
-    logger.info(f"Registered users: {len(user_ids)}. Unique keywords to fetch: {all_keywords}")
-
+    logger.info("Registered users: %s. Unique keywords to fetch: %s", len(user_ids), all_keywords)
     session = requests.Session()
 
     logger.info("Fetching current build_id...")
-    build_id = get_build_id(session)
-    logger.info(f"build_id: {build_id}")
+    try:
+        build_id = get_build_id(session)
+    except Exception:
+        logger.exception("Could not fetch staff.am build_id; aborting this run.")
+        return 1
+    logger.info("build_id: %s", build_id)
 
+    stats = {"keywords_failed": 0, "users_failed": 0, "sent": 0, "send_failed": 0}
     jobs_by_keyword = {}
     for keyword in all_keywords:
-        jobs_by_keyword[keyword] = collect_jobs_for_keyword(session, build_id, key_word=keyword, sort_by=2)
+        try:
+            jobs_by_keyword[keyword] = collect_jobs_for_keyword(
+                session, build_id, key_word=keyword, sort_by=2
+            )
+        except Exception:
+            stats["keywords_failed"] += 1
+            jobs_by_keyword[keyword] = []
+            logger.exception("Failed to collect jobs for keyword=%r; continuing.", keyword)
 
     for chat_id in user_ids:
-        keywords = user_filters[chat_id]
-        if not keywords:
-            continue
+        try:
+            keywords = user_filters[chat_id]
+            if not keywords:
+                continue
 
-        candidate_jobs = {}
-        for keyword in keywords:
-            for job in jobs_by_keyword.get(keyword, []):
-                candidate_jobs[job.get("id")] = job
+            candidate_jobs = {}
+            for keyword in keywords:
+                for job in jobs_by_keyword.get(keyword, []):
+                    candidate_jobs[job.get("id")] = job
 
-        new_jobs = [
-            job for job_id, job in candidate_jobs.items()
-            if not db.is_job_seen(chat_id, job_id)
-        ]
+            new_jobs = [
+                job for job_id, job in candidate_jobs.items()
+                if not db.is_job_seen(chat_id, job_id)
+            ]
 
-        if not new_jobs:
-            logger.info(f"chat_id={chat_id}: no new jobs to send.")
-            continue
+            if not new_jobs:
+                logger.info("chat_id=%s: no new jobs to send.", chat_id)
+                continue
 
-        logger.info(f"chat_id={chat_id}: sending {len(new_jobs)} new job(s).")
+            logger.info("chat_id=%s: sending %s new job(s).", chat_id, len(new_jobs))
+            sent_any = False
+            for job in new_jobs:
+                try:
+                    success = send_telegram_notification(chat_id, job)
+                    if success:
+                        db.mark_job_seen(chat_id, job.get("id"))
+                        stats["sent"] += 1
+                        sent_any = True
+                    else:
+                        stats["send_failed"] += 1
+                except Exception:
+                    stats["send_failed"] += 1
+                    logger.exception(
+                        "Unexpected error sending job=%s to chat_id=%s; continuing.",
+                        job.get("id"), chat_id,
+                    )
+                time.sleep(1)
 
-        sent_any = False
-        for job in new_jobs:
-            success = send_telegram_notification(chat_id, job)
-            if success:
-                db.mark_job_seen(chat_id, job.get("id"))
-                sent_any = True
-            time.sleep(1)
+            if sent_any:
+                try:
+                    asyncio.run(send_fresh_menu(chat_id))
+                except Exception:
+                    logger.exception("Could not send fresh menu to chat_id=%s.", chat_id)
+        except Exception:
+            stats["users_failed"] += 1
+            logger.exception("Failed to process chat_id=%s; continuing.", chat_id)
 
-        if sent_any:
-            asyncio.run(send_fresh_menu(chat_id))
+    try:
+        db.cleanup_old_seen_jobs(days=30)
+    except Exception:
+        logger.exception("Could not clean up old seen_jobs records.")
 
-    db.cleanup_old_seen_jobs(days=30)
-
-    logger.info("Parser run finished")
+    logger.info(
+        "Parser run finished: sent=%s, send_failed=%s, keywords_failed=%s, users_failed=%s",
+        stats["sent"], stats["send_failed"], stats["keywords_failed"], stats["users_failed"],
+    )
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
