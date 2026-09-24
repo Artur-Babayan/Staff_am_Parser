@@ -3,6 +3,7 @@
 *.log
 *.log.*
 *.lock
+LogArchive/
 *.json
 __pycache_*
 *.db

@@ -265,7 +265,7 @@ def run_parser():
         logger.info("No filters configured by any user. Nothing to do.")
         return 0
 
-    logger.info("Registered users: %s. Unique keywords to fetch: %s", len(user_ids), all_keywords)
+    logger.info("Registered users: %s. Unique keywords to fetch: %s", len(user_ids), len(all_keywords))
     session = requests.Session()
 
     logger.info("Fetching current build_id...")
