@@ -2,6 +2,7 @@
 .venv
 *.log
 *.log.*
+*.lock
 *.json
 __pycache_*
 *.db

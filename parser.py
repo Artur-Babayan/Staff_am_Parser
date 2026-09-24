@@ -1,4 +1,5 @@
 import os
+import fcntl
 import re
 import sys
 import time
@@ -22,6 +23,7 @@ TELEGRAM_SEND_PHOTO_URL = "https://api.telegram.org/bot{token}/sendPhoto"
 TELEGRAM_SEND_MESSAGE_URL = "https://api.telegram.org/bot{token}/sendMessage"
 TELEGRAM_MAX_ATTEMPTS = 4
 TELEGRAM_BACKOFF_SECONDS = 2
+PARSER_LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "parser.lock")
 
 URL_LANG = "am"
 
@@ -238,7 +240,7 @@ async def send_fresh_menu(chat_id: int):
     )
 
 
-def main():
+def run_parser():
     logger.info("=" * 60)
     logger.info("Parser run started")
 
@@ -344,6 +346,23 @@ def main():
         stats["sent"], stats["send_failed"], stats["keywords_failed"], stats["users_failed"],
     )
     return 0
+
+
+def main():
+    try:
+        with open(PARSER_LOCK_FILE, "w", encoding="utf-8") as lock_file:
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                logger.warning("Another parser instance is already running; skipping this run.")
+                return 0
+
+            lock_file.write(str(os.getpid()))
+            lock_file.flush()
+            return run_parser()
+    except OSError:
+        logger.exception("Could not create or acquire parser lock: %s", PARSER_LOCK_FILE)
+        return 1
 
 
 if __name__ == "__main__":
