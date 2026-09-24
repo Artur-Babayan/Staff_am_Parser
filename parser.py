@@ -19,6 +19,8 @@ DATA_ENDPOINT_TEMPLATE = "https://staff.am/_next/data/{build_id}/am/jobs.json"
 JOB_URL_TEMPLATE = "https://staff.am/{lang}/job/{slug}"
 TELEGRAM_SEND_PHOTO_URL = "https://api.telegram.org/bot{token}/sendPhoto"
 TELEGRAM_SEND_MESSAGE_URL = "https://api.telegram.org/bot{token}/sendMessage"
+TELEGRAM_MAX_ATTEMPTS = 4
+TELEGRAM_BACKOFF_SECONDS = 2
 
 URL_LANG = "am"
 
@@ -155,6 +157,23 @@ def get_profile_image(job: dict) -> str:
     return company.get("profile_image") or ""
 
 
+def _telegram_retry_delay(resp: requests.Response, attempt: int) -> float:
+    try:
+        retry_after = resp.json().get("parameters", {}).get("retry_after")
+        if retry_after is not None:
+            return max(float(retry_after), 0)
+    except (ValueError, TypeError, AttributeError):
+        pass
+
+    retry_after_header = resp.headers.get("Retry-After")
+    if retry_after_header is not None:
+        try:
+            return max(float(retry_after_header), 0)
+        except ValueError:
+            pass
+    return TELEGRAM_BACKOFF_SECONDS * (2 ** (attempt - 1))
+
+
 def send_telegram_notification(chat_id: int, job: dict):
     if not TOKEN:
         raise RuntimeError("TOKEN not found in .env file.")
@@ -163,28 +182,47 @@ def send_telegram_notification(chat_id: int, job: dict):
     company = get_company_title(job)
     image_url = get_profile_image(job)
     url = job.get("url", "")
-
     caption = f"{title}\n{company}\n{url}"
 
     if image_url:
-        resp = requests.post(
-            TELEGRAM_SEND_PHOTO_URL.format(token=TOKEN),
-            data={"chat_id": chat_id, "photo": image_url, "caption": caption},
-            timeout=15,
-        )
+        endpoint = TELEGRAM_SEND_PHOTO_URL
+        data = {"chat_id": chat_id, "photo": image_url, "caption": caption}
     else:
-        resp = requests.post(
-            TELEGRAM_SEND_MESSAGE_URL.format(token=TOKEN),
-            data={"chat_id": chat_id, "text": caption},
-            timeout=15,
-        )
+        endpoint = TELEGRAM_SEND_MESSAGE_URL
+        data = {"chat_id": chat_id, "text": caption}
 
-    if resp.status_code != 200:
-        logger.error(f"Failed to notify chat_id={chat_id} about job {job.get('id')}: {resp.status_code} {resp.text}")
+    for attempt in range(1, TELEGRAM_MAX_ATTEMPTS + 1):
+        try:
+            resp = requests.post(endpoint.format(token=TOKEN), data=data, timeout=15)
+        except requests.RequestException as exc:
+            if attempt == TELEGRAM_MAX_ATTEMPTS:
+                logger.error("Telegram request failed after %s attempts for job=%s: %s", attempt, job.get("id"), exc)
+                return False
+            delay = TELEGRAM_BACKOFF_SECONDS * (2 ** (attempt - 1))
+            logger.warning("Telegram network error for job=%s; retrying in %.1fs (%s/%s)", job.get("id"), delay, attempt, TELEGRAM_MAX_ATTEMPTS)
+            time.sleep(delay)
+            continue
+
+        if resp.status_code == 200:
+            try:
+                telegram_ok = resp.json().get("ok", False)
+            except (ValueError, AttributeError):
+                telegram_ok = False
+            if telegram_ok:
+                logger.info("Sent to chat_id=%s: %s (%s)", chat_id, title, company)
+                return True
+
+        retryable = resp.status_code == 429 or 500 <= resp.status_code < 600
+        if retryable and attempt < TELEGRAM_MAX_ATTEMPTS:
+            delay = _telegram_retry_delay(resp, attempt)
+            logger.warning("Telegram HTTP %s for job=%s; retrying in %.1fs (%s/%s)", resp.status_code, job.get("id"), delay, attempt, TELEGRAM_MAX_ATTEMPTS)
+            time.sleep(delay)
+            continue
+
+        logger.error("Failed to notify chat_id=%s about job %s after %s attempt(s): HTTP %s %s", chat_id, job.get("id"), attempt, resp.status_code, resp.text)
         return False
 
-    logger.info(f"Sent to chat_id={chat_id}: {title} ({company})")
-    return True
+    return False
 
 
 async def send_fresh_menu(chat_id: int):
